@@ -54,12 +54,19 @@ class PlaylistMaker:
                 continue
             if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
                 continue
-            info = self._extract_metadata(path)
+            try:
+                info = self._extract_metadata(path)
+            except ValueError as exc:
+                print(f"Skipping invalid file {path}: {exc}", file=sys.stderr)
+                continue
             tracks.append(info)
         return tracks
 
     def _extract_metadata(self, path: Path) -> TrackInfo:
-        metadata = MutagenFile(path)
+        try:
+            metadata = MutagenFile(path)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"Unable to read metadata: {exc}") from exc
         title = ""
         artist = ""
         album = ""
