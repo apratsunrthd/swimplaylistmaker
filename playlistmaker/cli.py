@@ -1,5 +1,6 @@
 import argparse
 import os
+import random
 import re
 import shutil
 import sys
@@ -40,12 +41,14 @@ class PlaylistMaker:
         client: OpenAI,
         model: str,
         target_minutes: int = DEFAULT_TARGET_MINUTES,
+        max_prompt_tokens: int = 200_000,
     ) -> None:
         self.library_root = library_root
         self.output_root = output_root
         self.client = client
         self.model = model
         self.target_minutes = target_minutes
+        self.max_prompt_tokens = max_prompt_tokens
 
     def scan_library(self) -> List[TrackInfo]:
         tracks: List[TrackInfo] = []
@@ -99,15 +102,16 @@ class PlaylistMaker:
         return None
 
     def build_prompt(self, tracks: Sequence[TrackInfo]) -> str:
-        lines = [
-            "You are a playlist curator tasked with building a 2-hour playlist for swimming.",
-            "Pick songs from the provided library only. Return the playlist as a numbered list with artist and title.",
-            "Keep the total duration as close to 120 minutes as possible and avoid duplicates.",
-            "Library:",
-        ]
-        for track in tracks:
-            duration_text = f"{int(track.duration_seconds)}s" if track.duration_seconds else "unknown"
-            lines.append(f"- {track.display_name} (album: {track.album or 'unknown'}, duration: {duration_text})")
+        limited_tracks = self._limit_tracks_for_prompt(tracks)
+        lines = self._prompt_header_lines()
+        for track in limited_tracks:
+            lines.append(self._format_track_line(track))
+
+        if len(limited_tracks) < len(tracks):
+            lines.append(
+                "Note: Library truncated due to rate limits; choose from the provided sample only."
+            )
+
         return "\n".join(lines)
 
     def request_playlist(self, tracks: Sequence[TrackInfo]) -> List[str]:
@@ -119,6 +123,38 @@ class PlaylistMaker:
         )
         message = response.choices[0].message.content or ""
         return self._parse_playlist_lines(message)
+
+    def _limit_tracks_for_prompt(self, tracks: Sequence[TrackInfo]) -> Sequence[TrackInfo]:
+        shuffled_tracks = list(tracks)
+        random.shuffle(shuffled_tracks)
+
+        header_lines = self._prompt_header_lines()
+        header = "\n".join(header_lines)
+        selected: List[TrackInfo] = []
+
+        for track in shuffled_tracks:
+            line = self._format_track_line(track)
+            new_total = self._estimate_tokens("\n".join([header, *[self._format_track_line(t) for t in selected], line]))
+            if new_total > self.max_prompt_tokens:
+                break
+            selected.append(track)
+
+        return selected
+
+    def _prompt_header_lines(self) -> List[str]:
+        return [
+            "You are a playlist curator tasked with building a 2-hour playlist for swimming.",
+            "Pick songs from the provided library only. Return the playlist as a numbered list with artist and title.",
+            "Keep the total duration as close to 120 minutes as possible and avoid duplicates.",
+            "Library:",
+        ]
+
+    def _format_track_line(self, track: TrackInfo) -> str:
+        duration_text = f"{int(track.duration_seconds)}s" if track.duration_seconds else "unknown"
+        return f"- {track.display_name} (album: {track.album or 'unknown'}, duration: {duration_text})"
+
+    def _estimate_tokens(self, text: str) -> int:
+        return max(1, (len(text) + 3) // 4)
 
     def _parse_playlist_lines(self, content: str) -> List[str]:
         entries: List[str] = []
